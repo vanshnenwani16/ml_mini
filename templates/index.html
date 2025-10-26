@@ -27,6 +27,26 @@
                 <div id="validationResults" class="alert d-none"></div>
             </div>
         </div>
+        
+        <!-- Data Analysis Section -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0">Data Analysis & Visualization</h5>
+            </div>
+            <div class="card-body">
+                <form id="analyzeForm">
+                    <div class="mb-3">
+                        <label for="analyzeFile" class="form-label">Upload Data for Analysis (CSV)</label>
+                        <input type="file" class="form-control" id="analyzeFile" accept=".csv">
+                        <small class="form-text text-muted">You can re-use the validated dataset or upload a new CSV.</small>
+                    </div>
+                    <button type="submit" class="btn btn-info">Analyze</button>
+                </form>
+                <div id="analysisResults" class="mt-3">
+                    <!-- Dynamic plots will appear here -->
+                </div>
+            </div>
+        </div>
 
         <!-- Model Training Section -->
         <div class="card mb-4">
@@ -70,6 +90,7 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
     <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
 </html>
