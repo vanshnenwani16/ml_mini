@@ -1,127 +1,378 @@
-import streamlit as st
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 import pandas as pd
 import numpy as np
-from src.data_validation import validate_dataset, prepare_dataset
-from src.model import ARDModel
+import plotly.express as px
+import plotly.graph_objects as go
+import json
+from scipy.stats import gaussian_kde
+import sys
 import os
 
-# Set page config
-st.set_page_config(
-    page_title="ADR Regression App",
-    page_icon="📊",
-    layout="wide"
-)
+# Add the parent directory to Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Initialize session state
-if 'model' not in st.session_state:
-    st.session_state.model = None
+from src.data_validation import validate_dataset, prepare_dataset
+from src.model import ARDModel
 
-def main():
-    st.title("ADR Regression Analysis Tool")
-    st.write("Upload your dataset and train an Automatic Relevance Determination regression model.")
-    
-    # File upload
-    uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
-    
-    if uploaded_file is not None:
-        # Load and display the dataset
-        try:
-            df = pd.read_csv(uploaded_file)
-            st.write("### Dataset Preview")
-            st.dataframe(df.head())
-            
-            # Dataset validation
-            is_valid, validation_results = validate_dataset(df)
-            
-            # Display validation results
-            if validation_results["errors"]:
-                st.error("Dataset Validation Errors:")
-                for error in validation_results["errors"]:
-                    st.write(f"- {error}")
-            
-            if validation_results["warnings"]:
-                st.warning("Dataset Validation Warnings:")
-                for warning in validation_results["warnings"]:
-                    st.write(f"- {warning}")
-            
-            if is_valid:
-                # Target column selection
-                numeric_columns = df.select_dtypes(include=[np.number]).columns.tolist()
-                target_column = st.selectbox(
-                    "Select target variable",
-                    options=numeric_columns
-                )
-                
-                # Model training
-                if st.button("Train Model"):
-                    with st.spinner("Training model..."):
-                        # Prepare dataset
-                        X, y = prepare_dataset(df, target_column)
-                        
-                        # Initialize and train model
-                        model = ARDModel()
-                        results = model.train(X, y)
-                        
-                        # Store model in session state
-                        st.session_state.model = model
-                        
-                        # Display results
-                        st.success("Model trained successfully!")
-                        
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            st.write("### Training Metrics")
-                            st.write(f"Train RMSE: {results['train_rmse']:.4f}")
-                            st.write(f"Test RMSE: {results['test_rmse']:.4f}")
-                            st.write(f"Train R²: {results['train_r2']:.4f}")
-                            st.write(f"Test R²: {results['test_r2']:.4f}")
-                        
-                        with col2:
-                            st.write("### Feature Relevance")
-                            relevance_df = pd.DataFrame(
-                                results['relevant_features'].items(),
-                                columns=['Feature', 'Relevance Score']
-                            )
-                            st.dataframe(relevance_df)
-                        
-                        # Save model
-                        model.save_model('model.pkl')
-                        st.info("Model saved as 'model.pkl'")
-                
-                # Prediction section
-                if st.session_state.model is not None:
-                    st.write("### Make Predictions")
-                    st.write("Upload a CSV file with the same features for prediction")
-                    
-                    pred_file = st.file_uploader("Choose a CSV file for prediction", type="csv", key="pred_file")
-                    
-                    if pred_file is not None:
-                        pred_df = pd.read_csv(pred_file)
-                        st.write("Preview of prediction data:")
-                        st.dataframe(pred_df.head())
-                        
-                        if st.button("Generate Predictions"):
-                            try:
-                                predictions = st.session_state.model.predict(pred_df)
-                                pred_df['Predictions'] = predictions
-                                
-                                st.write("### Predictions")
-                                st.dataframe(pred_df)
-                                
-                                # Download predictions
-                                csv = pred_df.to_csv(index=False)
-                                st.download_button(
-                                    label="Download Predictions",
-                                    data=csv,
-                                    file_name="predictions.csv",
-                                    mime="text/csv"
-                                )
-                            except Exception as e:
-                                st.error(f"Error generating predictions: {str(e)}")
+app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
+
+# Global variable to store the model
+MODEL = None
+
+def create_feature_importance_plot(model, feature_names):
+    """Create a feature importance visualization"""
+    try:
+        relevance_scores = model._get_relevant_features()
         
-        except Exception as e:
-            st.error(f"Error reading the file: {str(e)}")
+        # Sort features by importance
+        sorted_items = sorted(relevance_scores.items(), key=lambda x: x[1], reverse=True)
+        features, scores = zip(*sorted_items)
+        
+        # Create the bar plot
+        fig = px.bar(
+            x=features,
+            y=scores,
+            title='Feature Importance in ADR Model',
+            labels={'x': 'Features', 'y': 'Relevance Score'},
+            template='plotly_white'
+        )
+        
+        # Update layout for better visualization
+        fig.update_layout(
+            showlegend=False,
+            xaxis_tickangle=45,
+            bargap=0.2,
+            plot_bgcolor='white',
+            yaxis_title='Importance Score',
+            xaxis_title='Features',
+            margin=dict(l=50, r=50, t=50, b=100)
+        )
+        
+        # Add hover information
+        fig.update_traces(
+            hovertemplate='<b>%{x}</b><br>Importance: %{y:.4f}<extra></extra>'
+        )
+        
+        return json.loads(fig.to_json())
+    except Exception as e:
+        print(f"Error creating feature importance plot: {str(e)}")
+        return None
 
-if __name__ == "__main__":
-    main()
+def create_prediction_distribution_plot(predictions):
+    """Create a distribution plot of predictions"""
+    try:
+        fig = go.Figure()
+        
+        # Add histogram
+        fig.add_trace(go.Histogram(
+            x=predictions,
+            name='Prediction Distribution',
+            nbinsx=30,
+            histnorm='probability density'
+        ))
+        
+        # Add KDE plot
+        kde_x = np.linspace(min(predictions), max(predictions), 100)
+        kde = gaussian_kde(predictions)
+        fig.add_trace(go.Scatter(
+            x=kde_x,
+            y=kde(kde_x),
+            name='Density Estimation',
+            line=dict(color='red')
+        ))
+        
+        fig.update_layout(
+            title='Distribution of Predictions',
+            xaxis_title='Predicted Values',
+            yaxis_title='Density',
+            template='plotly_white',
+            showlegend=True,
+            margin=dict(l=50, r=50, t=50, b=50)
+        )
+        
+        return json.loads(fig.to_json())
+    except Exception as e:
+        print(f"Error creating distribution plot: {str(e)}")
+        return None
+
+def create_feature_impact_plot(df, model):
+    """Create a feature impact analysis plot"""
+    try:
+        feature_impacts = {}
+        baseline = model.predict(df).mean()
+        
+        for feature in model.feature_names:
+            temp_df = df.copy()
+            temp_df[feature] = temp_df[feature].mean()  # Set feature to its mean
+            new_pred = model.predict(temp_df).mean()
+            impact = ((baseline - new_pred) / baseline) * 100
+            feature_impacts[feature] = abs(impact)  # Use absolute impact
+        
+        # Sort by impact
+        sorted_impacts = dict(sorted(feature_impacts.items(), key=lambda x: x[1], reverse=True))
+        
+        fig = px.bar(
+            x=list(sorted_impacts.keys()),
+            y=list(sorted_impacts.values()),
+            title='Feature Impact Analysis',
+            labels={'x': 'Features', 'y': 'Impact (%)'},
+            template='plotly_white'
+        )
+        
+        fig.update_layout(
+            xaxis_tickangle=45,
+            showlegend=False,
+            margin=dict(l=50, r=50, t=50, b=100),
+            yaxis_title='% Impact on Predictions',
+            xaxis_title='Features'
+        )
+        
+        fig.update_traces(
+            hovertemplate='<b>%{x}</b><br>Impact: %{y:.2f}%<extra></extra>'
+        )
+        
+        return json.loads(fig.to_json())
+    except Exception as e:
+        print(f"Error creating feature impact plot: {str(e)}")
+        return None
+
+def create_prediction_vs_actual_plot(y_true, y_pred):
+    """Create a scatter plot of predicted vs actual values"""
+    try:
+        # Create DataFrame for plotting
+        plot_df = pd.DataFrame({
+            'Actual': y_true,
+            'Predicted': y_pred
+        })
+        
+        # Create scatter plot
+        fig = px.scatter(
+            plot_df,
+            x='Actual',
+            y='Predicted',
+            title='Predicted vs Actual Values',
+            template='plotly_white'
+        )
+        
+        # Calculate axis limits
+        min_val = min(min(y_true), min(y_pred))
+        max_val = max(max(y_true), max(y_pred))
+        axis_range = [min_val - (max_val - min_val) * 0.1, max_val + (max_val - min_val) * 0.1]
+        
+        # Add diagonal line for perfect predictions
+        fig.add_trace(
+            go.Scatter(
+                x=axis_range,
+                y=axis_range,
+                mode='lines',
+                name='Perfect Prediction',
+                line=dict(dash='dash', color='red'),
+                showlegend=True
+            )
+        )
+        
+        # Update layout
+        fig.update_layout(
+            xaxis_title='Actual Values',
+            yaxis_title='Predicted Values',
+            plot_bgcolor='white',
+            xaxis=dict(range=axis_range),
+            yaxis=dict(range=axis_range),
+            margin=dict(l=50, r=50, t=50, b=50)
+        )
+        
+        # Add hover information
+        fig.update_traces(
+            hovertemplate='<b>Actual</b>: %{x:.2f}<br><b>Predicted</b>: %{y:.2f}<extra></extra>',
+            marker=dict(size=8)
+        )
+        
+        return json.loads(fig.to_json())
+    except Exception as e:
+        print(f"Error creating prediction plot: {str(e)}")
+        return None
+
+@app.route('/api/validate', methods=['POST'])
+def validate_data():
+    """Validate uploaded dataset"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        # Read the CSV file
+        df = pd.read_csv(file)
+        
+        # Validate the dataset
+        is_valid, validation_results = validate_dataset(df)
+        
+        # Add column information
+        validation_results['columns'] = {
+            'numeric': df.select_dtypes(include=[np.number]).columns.tolist(),
+            'non_numeric': df.select_dtypes(exclude=[np.number]).columns.tolist()
+        }
+        
+        return jsonify({
+            'is_valid': is_valid,
+            'validation_results': validation_results
+        })
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/train', methods=['POST'])
+def train_model():
+    """Train the ADR model"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        
+        file = request.files['file']
+        target_column = request.form.get('target_column')
+        
+        if not target_column:
+            return jsonify({'error': 'No target column specified'}), 400
+        
+        # Read the CSV file
+        df = pd.read_csv(file)
+        
+        # Prepare dataset
+        X, y = prepare_dataset(df, target_column)
+        
+        # Initialize and train model
+        global MODEL
+        MODEL = ARDModel()
+        results = MODEL.train(X, y)
+        
+        # Create visualizations
+        feature_importance_plot = create_feature_importance_plot(MODEL, X.columns)
+        prediction_plot = create_prediction_vs_actual_plot(y, MODEL.predict(X))
+        
+        return jsonify({
+            'training_results': results,
+            'visualizations': {
+                'feature_importance': feature_importance_plot,
+                'prediction_plot': prediction_plot
+            }
+        })
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/predict', methods=['POST'])
+def predict():
+    """Make predictions using the trained model"""
+    try:
+        # Validate model and input
+        if MODEL is None:
+            return jsonify({'error': 'Model not trained yet'}), 400
+        
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        
+        file = request.files['file']
+        if not file.filename.endswith('.csv'):
+            return jsonify({'error': 'File must be a CSV file'}), 400
+            
+        # Read and validate input data
+        try:
+            df = pd.read_csv(file)
+        except Exception as e:
+            return jsonify({'error': f'Error reading CSV file: {str(e)}'}), 400
+            
+        # Verify required features
+        missing_features = set(MODEL.feature_names) - set(df.columns)
+        if missing_features:
+            return jsonify({
+                'error': f'Missing required features: {", ".join(missing_features)}'
+            }), 400
+            
+        # Make predictions
+        try:
+            predictions = MODEL.predict(df[MODEL.feature_names])
+            pred_list = predictions.tolist()
+        except Exception as e:
+            return jsonify({'error': f'Error making predictions: {str(e)}'}), 500
+            
+        # Prepare results DataFrame
+        result_df = pd.DataFrame({
+            'predicted_value': pred_list,
+            'input_id': range(1, len(pred_list) + 1)
+        })
+        
+        # Calculate statistics
+        stats = {
+            'mean': float(np.mean(predictions)),
+            'std': float(np.std(predictions)),
+            'min': float(np.min(predictions)),
+            'max': float(np.max(predictions)),
+            'quartiles': [
+                float(np.percentile(predictions, 25)),
+                float(np.percentile(predictions, 50)),
+                float(np.percentile(predictions, 75))
+            ],
+            'count': len(predictions)
+        }
+        
+        # Create visualizations
+        vis_data = create_visualizations(predictions, MODEL, df)
+        
+        # Create visualizations
+        fig_dist = go.Figure()
+        fig_dist.add_trace(go.Histogram(
+            x=predictions,
+            name='Prediction Distribution',
+            nbinsx=30
+        ))
+        fig_dist.update_layout(
+            title='Distribution of Predictions',
+            xaxis_title='Predicted Value',
+            yaxis_title='Count'
+        )
+
+        # Feature importance visualization
+        importance_scores = MODEL._get_relevant_features()
+        fig_importance = go.Figure()
+        fig_importance.add_trace(go.Bar(
+            x=list(importance_scores.keys()),
+            y=list(importance_scores.values()),
+            name='Feature Importance'
+        ))
+        fig_importance.update_layout(
+            title='Feature Importance Analysis',
+            xaxis_title='Features',
+            yaxis_title='Importance Score',
+            xaxis={'tickangle': 45}
+        )
+        
+        # Create response data with all required information
+        response_data = {
+            'predictions': result_df.to_dict('records'),
+            'model_analysis': {
+                'prediction_stats': stats,
+                'feature_importance': importance_scores
+            },
+            'visualizations': {
+                'distribution': {
+                    'data': [fig_dist.data[0]],
+                    'layout': fig_dist.layout
+                },
+                'feature_importance': {
+                    'data': [fig_importance.data[0]],
+                    'layout': fig_importance.layout
+                }
+            }
+        }
+        
+        return jsonify(response_data)
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(debug=False, host='0.0.0.0', port=8000)
